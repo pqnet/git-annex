@@ -101,6 +101,7 @@ makeXMPPGitRemote buddyname jid u = do
  -}
 xmppPush :: ClientID -> (Git.Repo -> IO Bool) -> (NetMessage -> Assistant ()) -> Assistant Bool
 xmppPush cid gitpush handledeferred = runPush SendPack cid handledeferred $ do
+	liftIO $ print ("xmppPush started", cid)
 	u <- liftAnnex getUUID
 	sendNetMessage $ Pushing cid (StartingPush u)
 
@@ -238,6 +239,7 @@ xmppGitRelay = do
  - its exit status to XMPP. -}
 xmppReceivePack :: ClientID -> (NetMessage -> Assistant ()) -> Assistant Bool
 xmppReceivePack cid handledeferred = runPush ReceivePack cid handledeferred $ do
+	liftIO $ print ("xmppReceivePack started", cid)
 	repodir <- liftAnnex $ fromRepo repoPath
 	let p = (proc "git" ["receive-pack", repodir])
 		{ std_in = CreatePipe
@@ -287,10 +289,6 @@ xmppRemotes cid theiruuid = case baseJID <$> parseJID cid of
 	knownuuid um r = Remote.uuid r == theiruuid || M.member theiruuid um
 
 handlePushInitiation :: (Remote -> Assistant ()) -> NetMessage -> Assistant ()
-handlePushInitiation _ (Pushing cid (CanPush theiruuid)) =
-	unlessM (null <$> xmppRemotes cid theiruuid) $ do
-		u <- liftAnnex getUUID
-		sendNetMessage $ Pushing cid (PushRequest u)
 handlePushInitiation checkcloudrepos (Pushing cid (PushRequest theiruuid)) =
 	go =<< liftAnnex (inRepo Git.Branch.current)
   where
@@ -304,10 +302,13 @@ handlePushInitiation checkcloudrepos (Pushing cid (PushRequest theiruuid)) =
 		liftIO $ Command.Sync.updateBranch (Command.Sync.syncBranch branch) g
 		selfjid <- ((T.unpack <$>) . xmppClientID) <$> getDaemonStatus
 		forM_ rs $ \r -> do
-			void $ alertWhile (syncAlert [r]) $
-				xmppPush cid
+			void $ alertWhile (syncAlert [r]) $ do
+				liftIO $ print ">>>>>>>>>>> XMPP PUSH STARTING >>>>>>>>>"
+				r <- xmppPush cid
 					(taggedPush u selfjid branch r)
 					(handleDeferred checkcloudrepos)
+				liftIO $ print (">>>>>>>>>>> XMPP PUSH COMPLETE >>>>>>>>>", r)
+				return r
 			checkcloudrepos r
 handlePushInitiation checkcloudrepos (Pushing cid (StartingPush theiruuid)) = do
 	rs <- xmppRemotes cid theiruuid
@@ -317,8 +318,17 @@ handlePushInitiation checkcloudrepos (Pushing cid (StartingPush theiruuid)) = do
 		mapM_ checkcloudrepos rs
 handlePushInitiation _ _ = noop
 
+handlePushNotice :: NetMessage -> Assistant ()
+handlePushNotice (Pushing cid (CanPush theiruuid)) =
+	unlessM (null <$> xmppRemotes cid theiruuid) $ do
+		u <- liftAnnex getUUID
+		sendNetMessage $ Pushing cid (PushRequest u)
+handlePushNotice _ = noop
+
 handleDeferred :: (Remote -> Assistant ()) -> NetMessage -> Assistant ()
-handleDeferred = handlePushInitiation
+handleDeferred checkcloudrepos m = do
+	liftIO $ print ("handleDeferred", m)
+	handlePushInitiation checkcloudrepos m
 
 writeChunk :: Handle -> B.ByteString -> IO ()
 writeChunk h b = do

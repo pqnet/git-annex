@@ -78,10 +78,14 @@ runPush :: PushSide -> ClientID -> (NetMessage -> Assistant ()) -> Assistant a -
 runPush side clientid handledeferred a = do
 	nm <- getAssistant netMessager
 	let runningv = getSide side $ netMessagerPushRunning nm
-	let setup = void $ atomically $ swapTMVar runningv $ Just clientid
-	let cleanup = atomically $ do
-		void $ swapTMVar runningv Nothing
-		emptytchan (getSide side $ netMessagesPush nm)
+	let setup = do
+		liftIO $ print ("runPush setup", side, clientid)
+		void $ atomically $ swapTMVar runningv $ Just clientid
+	let cleanup = do
+		liftIO $ print ("runPush cleanup", side, clientid)
+		atomically $ do
+			void $ swapTMVar runningv Nothing
+			emptytchan (getSide side $ netMessagesPush nm)
 	r <- E.bracket_ setup cleanup <~> a
 	(void . forkIO) <~> processdeferred nm
 	return r
@@ -105,25 +109,27 @@ runPush side clientid handledeferred a = do
 queueNetPushMessage :: NetMessage -> Assistant Bool
 queueNetPushMessage m@(Pushing clientid stage) = do
 	nm <- getAssistant netMessager
-	liftIO $ atomically $ do
+	(r, debug) <- liftIO $ atomically $ do
 		v <- readTMVar (getSide side $ netMessagerPushRunning nm)
 		case v of
-			Nothing -> return False
+			Nothing -> return (False, "process immediately")
 			(Just runningclientid)
-				| runningclientid == clientid -> queue nm
 				| isPushInitiation stage -> defer nm
+				| runningclientid == clientid -> queue nm
 				| otherwise -> discard
+	liftIO $ print ("queueNetPushMessage", side, debug, m)
+	return r
   where
 	side = pushDestinationSide stage
 	queue nm = do
 		writeTChan (getSide side $ netMessagesPush nm) m
-		return True
+		return (True, "queued")
 	defer nm = do
 		let mv = getSide side $ netMessagesPushDeferred nm
 		s <- takeTMVar mv
 		putTMVar mv $ S.insert m s
-		return True
-	discard = return True
+		return (True, "deferred")
+	discard = return (True, "discarded")
 queueNetPushMessage _ = return False
 
 waitNetPushMessage :: PushSide -> Assistant (NetMessage)
